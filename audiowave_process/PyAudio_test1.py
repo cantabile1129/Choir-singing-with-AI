@@ -1,3 +1,5 @@
+#なんの参考になるかはわからんが，拾ってきたらしい．
+
 import pyaudio
 import numpy as np
 from pydub import AudioSegment
