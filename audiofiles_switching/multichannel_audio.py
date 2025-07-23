@@ -3,9 +3,9 @@ import numpy as np
 import sounddevice as sd
 
 # === ファイルパス ===
-common_path = "コンコーネ50番前出しスネアドラム.wav"
-a_path = "concone_synthesizerV_KevinAI_trial2_MixDown.wav"
-b_path = "concone_synthesizerV_MoChenAI_trial2_MixDown.wav"
+common_path = "audiofiles/コンコーネ50番前出しスネアドラム.wav"
+a_path = "audiofiles/concone_synthesizerV_KevinAI_trial2_MixDown.wav"
+b_path = "audiofiles/concone_synthesizerV_MoChenAI_trial2_MixDown.wav"
 
 # === 共通音声を読み込み（6秒分だけ）===
 common, sr_c = sf.read(common_path)
