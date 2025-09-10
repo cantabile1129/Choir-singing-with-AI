@@ -4,8 +4,8 @@ import sounddevice as sd
 
 # === ファイルパス ===
 common_path = "audiofiles_switching/audiofiles/コンコーネ50番前出しスネアドラム.wav"
-a_path = "audiofiles_switching/audiofiles/concone_synthesizerV_KevinAI_trial2_MixDown.wav"
-b_path = "audiofiles_switching/audiofiles/concone_synthesizerV_京町セイカAI_trial2_MixDown.wav"
+a_path = "audiofiles_switching/audiofiles/concone_synthesizerV_RyoAI_trial2_MixDown.wav"
+b_path = "audiofiles_switching/audiofiles/concone_synthesizerV_MoChenAI_trial2_MixDown.wav"
 c_path = "audiofiles_switching/audiofiles/Concone_ピアノ伴奏.wav"
 
 # === 音声読み込み ===
@@ -42,9 +42,16 @@ individual_3ch = np.stack([a, b, c], axis=1).astype(np.float32)
 combined = np.concatenate([common_3ch, individual_3ch], axis=0)
 
 # === 再生 ===
-print("🔊 3チャンネル完全同期再生を開始...")
+print("🔊 3チャンネル完全同期再生を開始（Ctrl+C または Enter で停止）")
 sd.play(combined, samplerate=fs)
-sd.wait()
-print("✅ すべての再生が完了しました（3ch）")
+
+try:
+    input("⏯ 再生中... Enterキーで停止します。\n")
+except KeyboardInterrupt:
+    print("\n❌ Ctrl+C により強制停止されました。")
+finally:
+    sd.stop()
+    print("✅ 再生を停止しました。")
+
 
 

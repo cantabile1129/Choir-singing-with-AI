@@ -7,7 +7,7 @@ import os
 # === パラメータ設定 ===
 SAMPLE_RATE = 44100      # 高精度解析用に変更
 CHANNELS = 2             # 0: mic, 1: EGG
-DURATION = 10            # 秒
+DURATION = 90            # 秒
 BASE_DIR = "recordings"
 WAV_PATH = os.path.join(BASE_DIR, "recorded_sync.wav")
 CSV_PATH = os.path.join(BASE_DIR, "recorded_sync.csv")
@@ -39,12 +39,3 @@ df = pd.DataFrame({
 # === CSV 保存 ===
 df.to_csv(CSV_PATH, index=False)
 print(f"📄 CSV保存完了: {CSV_PATH}")
-
-# === Parquet 保存 ===
-df.to_parquet(PARQUET_PATH, index=False)
-print(f"📦 Parquet保存完了: {PARQUET_PATH}")
-
-# === NumPy 圧縮保存（npz）===
-np.savez_compressed(NPZ_PATH, time_sec=timestamps,
-                    mic_signal=data[:, 0], egg_signal=data[:, 1])
-print(f"🗜 NumPy圧縮保存完了: {NPZ_PATH}")
