@@ -1,0 +1,5 @@
+*.wav filter=lfs diff=lfs merge=lfs -text
+*.parquet filter=lfs diff=lfs merge=lfs -text
+*.csv filter=lfs diff=lfs merge=lfs -text
+recordings/*.parquet filter=lfs diff=lfs merge=lfs -text
+recordings/*.csv filter=lfs diff=lfs merge=lfs -text

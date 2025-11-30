@@ -1,0 +1,25 @@
+#.gitignore に仮想環境フォルダを追加（今後追跡されないようにする）
+echo "myenv-ttslearn/" >> .gitignore
+git add .gitignore
+git commit -m "Ignore virtual environment directory"
+
+# 現在の仮想環境に入っているパッケージを freeze
+pip freeze > requirements.txt
+git add requirements.txt
+git commit -m "Add requirements.txt for environment reproduction"
+
+#インストール（初回のみ）
+pip install git-filter-repo
+
+cd ..
+#単純コピーでバックアップ
+cp -r your-project/ your-project-backup/
+#または別ディレクトリに新しくクローンする
+git clone --mirror your-project/ your-project-backup.git
+
+cd "Pythonで学ぶ音声合成"
+#仮想環境フォルダを履歴から削除
+git filter-repo --path myenv-ttslearn --invert-paths --force
+
+#GitHub に強制 push（履歴が変わっているため）
+git push origin main --force

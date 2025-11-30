@@ -1,0 +1,13 @@
+python Choir-singing-with-AI/audiowave_switching/real_file_selector.py \
+  --wav Choir-singing-with-AI/audiowave_switching/Saki/concone_synthesizerV_SakiAI_1_4_2_seg06.wav \
+  --percentiles_csv Choir-singing-with-AI/audiowave_process/rawdata/pre_audio/merged/tables/merged_pre_id1-id2_solo_segALL_param_percentiles.csv \
+  --extended_csv Choir-singing-with-AI/audiowave_process/rawdata/pre_audio/merged/tables/merged_pre_id1-id2_solo_segALL_extended_stats.csv \
+  --reg_spline_csv Choir-singing-with-AI/audiowave_process/rawdata/pre_audio/merged/figs/merged_pre_id1-id2_solo_segALL_CLEAN_egg_vs_audio_regressions_spline.csv \
+  --gmm_csv Choir-singing-with-AI/audiowave_process/rawdata/pre_audio/merged/tables/merged_pre_id1-id2_solo_segALL_CLEAN_gmm_params.csv \
+  --segment_id segALL \
+  --quality CLEAN \
+  --oq_candidates 1 2 3 4 5 \
+  --rq_candidates 1 2 3 4 5 \
+  --base_prefix concone_synthesizerV_SakiAI \
+  --segment_index 6 \
+  --out_json debug_test_seg06.json
