@@ -1,9 +1,18 @@
-python Choir-singing-with-AI/audiowave_switching/realtime_concone_switcher.py \
-  --segments 6-18 18-23.25 23.25-30 30-36 36-42 42-48 48-54 54-60 60-66 66-71.25 71.25-78 \
-  --percentiles_csv Choir-singing-with-AI/audiowave_process/rawdata/pre_audio/merged/tables/merged_pre_id1-id2_solo_segALL_param_percentiles.csv \
-  --extended_csv Choir-singing-with-AI/audiowave_process/rawdata/pre_audio/merged/tables/merged_pre_id1-id2_solo_segALL_extended_stats.csv \
-  --reg_spline_csv Choir-singing-with-AI/audiowave_process/rawdata/pre_audio/merged/figs/merged_pre_id1-id2_solo_segALL_CLEAN_egg_vs_audio_regressions_spline.csv \
-  --gmm_csv Choir-singing-with-AI/audiowave_process/rawdata/pre_audio/merged/tables/merged_pre_id1-id2_solo_segALL_CLEAN_gmm_params.csv \
-  --ai_root Choir-singing-with-AI/audiowave_switching/Saki \
-  --base_prefix concone_synthesizerV_SakiAI \
-  --outdir logs_Saki
+python audiofiles_switching\realtime_concone_asio.py 
+  --segments "6-12" "12-18" "18-23.25" "23.25-30" "30-36" "36-42" "42-48" "48-54" "54-60" "60-66" "66-71.25" "71.25-78" 
+  --percentiles_csv audiofiles_switching\analysis_csv\merged_pre_id1-id2_solo_segALL_param_percentiles.csv 
+  --extended_csv audiofiles_switching\analysis_csv\merged_pre_id1-id2_solo_segALL_extended_stats.csv 
+  --reg_spline_csv audiofiles_switching\analysis_csv\merged_pre_id1-id2_solo_segALL_CLEAN_egg_vs_audio_regressions_spline.csv 
+  --gmm_csv audiofiles_switching\analysis_csv\merged_pre_id1-id2_solo_segALL_CLEAN_gmm_params.csv 
+  --ai_root audiofiles_switching\audiofiles\Saki
+  --base_prefix concone_synthesizerV_SakiAI 
+  --outdir audiofiles_switching\real_audio
+  --metronome_wav audiofiles_switching\audiofiles\コンコーネ50番前出しスネアドラム.wav
+  --accomp_wav audiofiles_switching\audiofiles\Concone_ピアノ伴奏.wav
+  --in_channels 8
+  --analysis_channel 0
+  --input_device 14
+  --output_device 14
+  --segment_id segALL
+  --quality CLEAN
+  --cut_margin 0.5
