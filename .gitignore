@@ -1,5 +1,6 @@
 # Python venv
-.venv
+myenv
+newenv
 
 audiofiles_switching/audiofiles/Jin/
 audiofiles_switching/audiofiles/Kevin/
@@ -9,5 +10,7 @@ audiofiles_switching/audiofiles/Saki/
 audiofiles_switching/audiofiles/花隈/
 audiofiles_switching/audiofiles/京町/
 audiofiles_switching/audiofiles/小春/
+audiofiles_switching/audiofiles/audiofiles.zip
+audiofiles_switching/real_audio
 
 Choir-singing-with-AI

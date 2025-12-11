@@ -56,10 +56,16 @@ import json
 import pickle
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
+import traceback
 
+import soundfile as sf
 import numpy as np
 import pandas as pd
 import librosa
+
+from multiprocessing import Process, Queue
+
+
 
 
 # =========================================================
@@ -321,84 +327,173 @@ class PercentileBank:
 # 3. 音響特徴量抽出（簡易版）
 # =========================================================
 
-def extract_acoustic_features(
-    wav_path: str,
-    sr: int = 48000,
-) -> Dict[str, float]:
-    """
-    GMM_additional に近い感じの静的音響特徴量を一括で推定。
-    - f0_hz: YIN で推定した F0 の中央値
-    - spec_centroid_hz: スペクトル重心の平均
-    - spec_bandwidth_hz: スペクトル帯域幅の平均
-    - zcr: ゼロ交差率（平均）
-    - rms_dbfs: RMS を dBFS 化
-    - mfcc1..mfcc5: 各 MFCC の平均
-    - vibrato_cents_abs: F0 をセントにして絶対値の平均（簡易版）
-    - cpp_snr: とりあえず 0.0 （必要なら差し替え）
 
-    ※ WORLD aperiodicity は使用しない。
+def extract_acoustic_features(wav_path: str, target_sr: int = 44100) -> dict:
+    """
+    高速版 acoustic features 抽出関数。
+    - pyin は使わず、自前の高速自己相関で f0 を推定
+    - MFCC はフレーム平均して 5 次元にまとめる
+    - 例外で落ちないように、なるべく安全側に倒す
     """
 
-    y, fs = librosa.load(wav_path, sr=sr)
-    if y.ndim > 1:
-        y = np.mean(y, axis=1)
+    import time
+    import soundfile as sf
+    import numpy as np
+    import librosa
 
-    # --- F0 (YIN) ---
-    f0 = librosa.yin(
-        y,
-        fmin=50.0,
-        fmax=1000.0,
-        sr=fs,
-    )
-    f0_valid = f0[f0 > 0]
-    if len(f0_valid) == 0:
-        f0_mean = 0.0
-    else:
-        f0_mean = float(np.median(f0_valid))
+    t0 = time.time()
+    print(f"[FEAT] START: wav_path={wav_path}, target_sr={target_sr}")
 
-    # --- spectral features ---
-    hop_length = 512
-    centroid = librosa.feature.spectral_centroid(y=y, sr=fs, hop_length=hop_length)
-    bandwidth = librosa.feature.spectral_bandwidth(y=y, sr=fs, hop_length=hop_length)
-    zcr = librosa.feature.zero_crossing_rate(y, hop_length=hop_length)
-    rms = librosa.feature.rms(y=y, hop_length=hop_length)
+    # -------------------------
+    # Step 1: 読み込み
+    # -------------------------
+    t1 = time.time()
+    print("[FEAT] Step 1/5: sf.read(...)")
+    y, fs = sf.read(wav_path)
+    print(f"[FEAT]   read done: shape={y.shape}, fs={fs}, time={time.time()-t1:.3f}s")
 
-    spec_centroid_hz = float(np.mean(centroid))
-    spec_bandwidth_hz = float(np.mean(bandwidth))
-    zcr_mean = float(np.mean(zcr))
+    # モノラル化
+    if isinstance(y, np.ndarray) and y.ndim > 1:
+        y = y.mean(axis=1)
 
-    rms_mean = float(np.mean(rms))
-    eps = 1e-12
-    rms_dbfs = float(20.0 * np.log10(rms_mean + eps))
+    # -------------------------
+    # Step 2: リサンプリング
+    # -------------------------
+    t2 = time.time()
+    print(f"[FEAT] Step 2/5: resample {fs} -> {target_sr}")
+    y = y.astype(np.float32)
 
-    # --- MFCC ---
-    mfcc = librosa.feature.mfcc(y=y, sr=fs, n_mfcc=5, hop_length=hop_length)
-    mfcc_means = [float(np.mean(mfcc[i])) for i in range(mfcc.shape[0])]
+    if fs != target_sr:
+        try:
+            y = librosa.resample(y, orig_sr=fs, target_sr=target_sr)
+            fs = target_sr
+        except Exception as e:
+            print("[FEAT][WARN] resample failed, use original fs:", e)
 
-    # --- vibrato_cents_abs (簡易) ---
-    if len(f0_valid) > 0:
-        f0_med = np.median(f0_valid)
-        cents = 1200.0 * np.log2(f0_valid / f0_med)
-        vibrato_cents_abs = float(np.mean(np.abs(cents)))
-    else:
-        vibrato_cents_abs = 0.0
+    print(f"[FEAT]   resample done: len={len(y)}, time={time.time()-t2:.3f}s")
 
-    # --- CPP (ダミー; 必要なら実装に差し替え) ---
-    cpp_snr = 0.0
+    # 正規化（念のため）
+    peak = float(np.max(np.abs(y))) + 1e-9
+    y = y / peak
 
-    feat: Dict[str, float] = {
-        "f0_hz": f0_mean,
-        "spec_centroid_hz": spec_centroid_hz,
-        "spec_bandwidth_hz": spec_bandwidth_hz,
-        "zcr": zcr_mean,
-        "rms_dbfs": rms_dbfs,
-        "vibrato_cents_abs": vibrato_cents_abs,
-        "cpp_snr": cpp_snr,
+    # -------------------------
+    # Step 3: 基本特徴量 + スペクトル系
+    # -------------------------
+    t3 = time.time()
+    print("[FEAT] Step 3/5: basic + spectral features")
+
+    # RMS / dBFS
+    rms = float(np.sqrt(np.mean(y ** 2) + 1e-12))
+    rms_dbfs = 20 * np.log10(rms + 1e-12)
+
+    # ZCR（ゼロクロス率）
+    zcr = float(((y[:-1] * y[1:]) < 0).mean())
+
+    # STFT → スペクトル特徴
+    try:
+        S = np.abs(librosa.stft(y, n_fft=1024, hop_length=256))
+        spec_centroid = float(librosa.feature.spectral_centroid(S=S, sr=fs).mean())
+        spec_rolloff = float(librosa.feature.spectral_rolloff(S=S, sr=fs).mean())
+        spec_bandwidth = float(librosa.feature.spectral_bandwidth(S=S, sr=fs).mean())
+    except Exception as e:
+        print("[FEAT][WARN] spectral features failed:", e)
+        spec_centroid = 0.0
+        spec_rolloff = 0.0
+        spec_bandwidth = 0.0
+
+    # MFCC（フレーム平均して 5 次元に）
+    try:
+        mfcc = librosa.feature.mfcc(y=y, sr=fs, n_mfcc=5)
+        # mfcc.shape = (5, T) → 軸1で平均して (5,) に
+        mfcc_mean = mfcc.mean(axis=1)
+        mfcc1, mfcc2, mfcc3, mfcc4, mfcc5 = [float(v) for v in mfcc_mean]
+    except Exception as e:
+        print("[FEAT][WARN] MFCC failed:", e)
+        mfcc1 = mfcc2 = mfcc3 = mfcc4 = mfcc5 = 0.0
+
+    print(f"[FEAT]   basic+spectral done, time={time.time()-t3:.3f}s")
+
+    # -------------------------
+    # Step 4: 高速 f0 推定（自己相関）
+    # -------------------------
+    t4 = time.time()
+    print("[FEAT] Step 4/5: fast f0 (autocorr)")
+
+    def fast_f0_autocorr(x, sr=44100, fmin=80, fmax=800):
+        # 先頭 100ms くらいだけ見る
+        if len(x) < sr // 20:
+            return 0.0
+        frame = x[: sr // 10]
+        frame = frame - frame.mean()
+
+        corr = np.correlate(frame, frame, mode="full")
+        corr = corr[len(corr) // 2 :]
+
+        min_lag = int(sr / fmax)
+        max_lag = int(sr / fmin)
+        search = corr[min_lag:max_lag]
+        if len(search) == 0:
+            return 0.0
+
+        lag = int(np.argmax(search)) + min_lag
+        return float(sr / lag)
+
+    try:
+        f0_hz = fast_f0_autocorr(y, sr=fs)
+    except Exception as e:
+        print("[FEAT][WARN] fast f0 failed:", e)
+        f0_hz = 0.0
+
+    print(f"[FEAT]   f0 done: {f0_hz:.2f} Hz, time={time.time()-t4:.3f}s")
+
+    # -------------------------
+    # Step 5: vibrato 粗推定
+    # -------------------------
+    t5 = time.time()
+    print("[FEAT] Step 5/5: vibrato estimation")
+
+    vib_cents = 0.0
+    try:
+        hop = int(fs * 0.02)  # 20ms
+        f0_track = []
+        for i in range(0, len(y) - hop, hop):
+            f = fast_f0_autocorr(y[i : i + hop], sr=fs)
+            if f > 50:
+                f0_track.append(f)
+
+        if len(f0_track) > 3 and np.mean(f0_track) > 0:
+            f0_track = np.asarray(f0_track, dtype=np.float32)
+            vib_cents = float(np.std(np.diff(f0_track)) / np.mean(f0_track) * 1200)
+        else:
+            vib_cents = 0.0
+    except Exception as e:
+        print("[FEAT][WARN] vibrato estimation failed:", e)
+        vib_cents = 0.0
+
+    print(f"[FEAT]   vibrato done: {vib_cents:.2f}, time={time.time()-t5:.3f}s")
+
+    # -------------------------
+    # 全体時間 & 戻り値
+    # -------------------------
+    print(f"[FEAT] FINISH: total={time.time()-t0:.3f}s")
+
+    return {
+        "f0_hz": float(f0_hz),
+        "spec_centroid_hz": float(spec_centroid),
+        "spec_bandwidth_hz": float(spec_bandwidth),
+        "spec_rolloff_hz": float(spec_rolloff),
+        "zcr": float(zcr),
+        "rms_dbfs": float(rms_dbfs),
+        "vibrato_cents_abs": float(vib_cents),
+        "cpp_snr": 0.0,  # CPP はダミーで 0
+        "mfcc1": float(mfcc1),
+        "mfcc2": float(mfcc2),
+        "mfcc3": float(mfcc3),
+        "mfcc4": float(mfcc4),
+        "mfcc5": float(mfcc5),
     }
-    for i, v in enumerate(mfcc_means, start=1):
-        feat[f"mfcc{i}"] = v
 
-    return feat
+
 
 
 # =========================================================
@@ -728,14 +823,21 @@ def main():
 
 
     # 5) ファイル名
+    # 5) ファイル名（オフラインテストでは「次セグメント」を返す）
+    if args.segment_index is not None:
+        next_seg = args.segment_index + 1
+    else:
+        next_seg = None
+
     fname = build_audio_filename(
         base_prefix=args.base_prefix,
         oq_idx=oq_idx,
         rq_idx=rq_idx,
         vib_idx=vib_idx,
-        segment_index=args.segment_index,
+        segment_index=next_seg,
         ext=".wav",
     )
+
 
     result = {
         "wav_input": args.wav,
