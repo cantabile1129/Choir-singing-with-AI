@@ -26,6 +26,7 @@ import time
 import threading
 from typing import List, Tuple, Dict, Optional
 import traceback
+import pandas as pd
 
 # === Multiprocessing for heavy feature analysis ===
 from multiprocessing import Process, Queue
@@ -278,17 +279,26 @@ def preload_ai_candidates(
 # ============================================
 
 class SegmentConfig:
-    def __init__(self, start: float, end: float, cut_margin: float = 2.0):
+    def __init__(self, start: float, end: float, cut_margin: float = 0.75):
         self.start = float(start)
         self.end = float(end)
         self.cut_time = max(self.start, self.end - cut_margin)
 
-        self.ai_path = None
-        self.ai_audio = None
-        self.oq = None
-        self.rq = None
-        self.vib = None
+        # 左右別 AI 再生用
+        self.ai_path_L = None
+        self.ai_audio_L = None
+        self.oq_L = None
+        self.rq_L = None
+        self.vib_L = None
+
+        self.ai_path_R = None
+        self.ai_audio_R = None
+        self.oq_R = None
+        self.rq_R = None
+        self.vib_R = None
+
         self.analysis_sent = False
+
 
 
 
@@ -309,53 +319,125 @@ def analysis_worker_proc(
     gmm_bank,
     oq_candidates,
     rq_candidates,
-    base_prefix,
-    ai_root,
+    ai_left_prefix,
+    ai_left_root,
+    ai_right_prefix,
+    ai_right_root,
 ):
     """
-    別プロセスで動く解析ワーカー。
-
-    task_queue に (seg_num, wav_path, next_seg_num) が来たら、
-    real_file_selector を実行し、結果を result_queue に入れる。
+    L/R 別々の次セグメント AI 音声を決定するワーカー。
+    task_queue には (seg_num, wav_path, next_seg) が入る。
     """
 
+    # ===== この子プロセス内で acoustic feature の warmup を実行 =====
+    try:
+        import numpy as np
+        import librosa
+
+        sr = 44100  # 親と同じ SR を想定（必要なら引数で渡してもよい）
+
+        print("[WARMUP][worker] full acoustic feature warmup start...")
+
+        dummy = np.zeros(sr, dtype=np.float32)
+
+        # --- extract_acoustic_features と同じ STFT + spectral + MFCC ---
+        S = np.abs(librosa.stft(dummy, n_fft=1024, hop_length=256))
+        _ = librosa.feature.spectral_centroid(S=S, sr=sr)
+        _ = librosa.feature.spectral_rolloff(S=S, sr=sr)
+        _ = librosa.feature.spectral_bandwidth(S=S, sr=sr)
+        _ = librosa.feature.mfcc(y=dummy, sr=sr, n_mfcc=5)
+
+        # --- fast f0 (autocorr) と vibrato の warmup ---
+        def _fast_f0_autocorr_warm(x, sr=sr):
+            if len(x) < sr // 10:
+                return
+            frame = x[: sr // 10]
+            frame = frame - frame.mean()
+            corr = np.correlate(frame, frame, mode="full")
+            corr = corr[len(corr) // 2 :]
+
+            min_lag = int(sr / 800)
+            max_lag = int(sr / 80)
+            if max_lag <= min_lag:
+                return
+            _ = np.argmax(corr[min_lag:max_lag])
+
+        # f0 1回
+        _fast_f0_autocorr_warm(dummy, sr=sr)
+
+        # vibrato 用に短いフレームを何個か回す
+        hop = int(sr * 0.02)
+        for i in range(0, len(dummy) - hop, hop):
+            frame = dummy[i : i + hop]
+            _fast_f0_autocorr_warm(frame, sr=sr)
+
+        print("[WARMUP][worker] full acoustic feature warmup done.")
+    except Exception as e:
+        print("[WARMUP][worker][WARN] warmup failed:", e)
+
+    # ===== ここから従来の解析ループ =====
     while True:
         item = task_queue.get()
         if item is None:
             break
 
         seg_num, wav_path, next_seg = item
+        seg_label = f"seg{seg_num:02d}"
 
         try:
-            oq, rq, vib, ai_path, debug = select_ai_file(
+            # ===== LEFT =====
+            oq_L, rq_L, vib_L, ai_path_L, debug_L = select_ai_file(
                 wav_path=wav_path,
                 reg_bank=reg_bank,
                 perc_bank=perc_bank,
                 gmm_bank=gmm_bank,
                 oq_cand=oq_candidates,
                 rq_cand=rq_candidates,
-                base_prefix=base_prefix,
+                base_prefix=ai_left_prefix,
                 next_seg=next_seg,
-                ai_root=ai_root,
-                seg_label=f"seg{seg_num:02d}",
+                ai_root=ai_left_root,
+                seg_label=seg_label + "[L]",
             )
-            
-            # ★ ここで次のAI音声を読み込んで numpy にしてしまう（事前ロード）
-            ai_audio = None
-            try:
-                if os.path.exists(ai_path):
-                    y_ai, fs_ai = sf.read(ai_path, always_2d=True)
-                    ai_audio = y_ai.astype(np.float32)
-            except Exception as e:
-                print(f"[ANALYSIS-PROC][WARN] AI wav preload failed: {ai_path}: {e}")
 
+            ai_audio_L = None
+            if os.path.exists(ai_path_L):
+                y, fs = sf.read(ai_path_L, always_2d=True)
+                ai_audio_L = y.astype(np.float32)
 
-            result_queue.put((seg_num, next_seg, oq, rq, vib, ai_path, ai_audio, debug))
+            # ===== RIGHT =====
+            oq_R, rq_R, vib_R, ai_path_R, debug_R = select_ai_file(
+                wav_path=wav_path,
+                reg_bank=reg_bank,
+                perc_bank=perc_bank,
+                gmm_bank=gmm_bank,
+                oq_cand=oq_candidates,
+                rq_cand=rq_candidates,
+                base_prefix=ai_right_prefix,
+                next_seg=next_seg,
+                ai_root=ai_right_root,
+                seg_label=seg_label + "[R]",
+            )
+
+            ai_audio_R = None
+            if os.path.exists(ai_path_R):
+                y, fs = sf.read(ai_path_R, always_2d=True)
+                ai_audio_R = y.astype(np.float32)
+
+            # ===== 結果をメイン側へ =====
+            result_queue.put(
+                (
+                    seg_num,
+                    next_seg,
+                    (oq_L, rq_L, vib_L, ai_path_L, ai_audio_L, debug_L),
+                    (oq_R, rq_R, vib_R, ai_path_R, ai_audio_R, debug_R),
+                )
+            )
 
         except Exception as e:
-            print(f"[ANALYSIS-PROC][ERROR] seg{seg_num:02d}: {e}")
+            print(f"[ANALYSIS-PROC][ERROR] {seg_label}: {e}")
             traceback.print_exc()
-            result_queue.put((seg_num, next_seg, None, None, None, None, None))
+            result_queue.put((seg_num, next_seg, None, None))
+
 
 
 
@@ -367,6 +449,10 @@ def analysis_worker_proc(
 
 def main():
     global GLOBAL_SAMPLE_IDX, SR_GLOBAL, CURRENT_PLAYING, LOGGING_STOP
+    
+    global STREAM_STOP_REQUESTED
+    STREAM_STOP_REQUESTED = False
+
 
     parser = argparse.ArgumentParser(description="Real-time Concone streaming switcher (full-duplex)")
 
@@ -389,15 +475,18 @@ def main():
         help='例: --segments "6-12" "12-18" "18-24"'
     )
     
-    parser.add_argument("--cut_margin", type=float, default=2.0,
-                    help="Segment end minus this seconds for analysis cutoff (default: 2.0)")
+    parser.add_argument("--cut_margin", type=float, default=0.75,
+                    help="Segment end minus this seconds for analysis cutoff (default: 0.75)")
 
+    
+    
+    # ===== AI音声 L/R 別指定 =====
+    parser.add_argument("--ai_left_root",   type=str, required=True)
+    parser.add_argument("--ai_left_prefix", type=str, required=True)
 
-    # ===== AI音声ファイルの検索根 =====
-    parser.add_argument("--ai_root", type=str, required=True)
+    parser.add_argument("--ai_right_root",   type=str, required=True)
+    parser.add_argument("--ai_right_prefix", type=str, required=True)
 
-    # ===== ベース名 =====
-    parser.add_argument("--base_prefix", type=str, required=True)
 
     # ===== 録音・再生 =====
     parser.add_argument("--sr", type=int, default=44100)
@@ -466,39 +555,51 @@ def main():
     )
     gmm_bank = rfs.load_gmm_params(args.gmm_csv)
     
-    # ======================
-    # librosa.pyin numba warmup
-    # ======================
-    print("[WARMUP] librosa.pyin warmup start...")
-    import librosa
+    print("[WARMUP] full acoustic feature warmup start...")
+
     import numpy as np
+    import librosa
 
-    dummy = np.random.randn(44100).astype(np.float32)
-    try:
-        _f0, _, _ = librosa.pyin(
-            dummy,
-            fmin=80, fmax=800,
-            sr=sr,
-            frame_length=1024,
-            hop_length=256,
-        )
-        print("[WARMUP] librosa.pyin warmup done.")
-    except Exception as e:
-        print("[WARMUP][WARN] librosa.pyin warmup failed:", e)
+    dummy = np.zeros(sr, dtype=np.float32)
 
-    # ============================================
-    # ★ 追加：spectral, MFCC, STFT warmup
-    # ============================================
-    print("[WARMUP] spectral + MFCC warmup start...")
+    # --- Step 3: STFT + spectral + MFCC warmup (extract_acoustic_features と完全一致) ---
     try:
         S = np.abs(librosa.stft(dummy, n_fft=1024, hop_length=256))
         _ = librosa.feature.spectral_centroid(S=S, sr=sr)
         _ = librosa.feature.spectral_rolloff(S=S, sr=sr)
         _ = librosa.feature.spectral_bandwidth(S=S, sr=sr)
         _ = librosa.feature.mfcc(y=dummy, sr=sr, n_mfcc=5)
-        print("[WARMUP] spectral + MFCC warmup done.")
     except Exception as e:
-        print("[WARMUP][WARN] spectral warmup failed:", e)
+        print("[WARMUP][WARN] spectral/MFCC warmup failed:", e)
+
+    # --- Step 4: fast f0 warmup (extract_acoustic_features と同じ) ---
+    def _fast_f0_autocorr_warm(x, sr=sr):
+        frame = x[: sr // 10]
+        frame = frame - frame.mean()
+        corr = np.correlate(frame, frame, mode="full")
+        corr = corr[len(corr)//2:]
+        min_lag = int(sr / 800)
+        max_lag = int(sr / 80)
+        if max_lag <= min_lag:
+            return
+        _ = np.argmax(corr[min_lag:max_lag])
+
+    _fast_f0_autocorr_warm(dummy)
+
+    # --- Step 5 vibrato warmup ---
+    try:
+        hop = int(sr * 0.02)
+        for i in range(0, len(dummy)-hop, hop):
+            frame = dummy[i:i+hop]
+            _fast_f0_autocorr_warm(frame, sr=sr)
+    except Exception:
+        pass
+
+    print("[WARMUP] full acoustic feature warmup done.")
+
+
+
+
 
 
 
@@ -533,20 +634,28 @@ def main():
     accomp_audio, fs_acc = load_wav_mono_or_stereo(args.accomp_wav, target_sr=sr)
 
     # ===== AI 音声 事前読み込み =====
+    # ===== AI 音声 事前読み込み (L/R 別) =====
     max_seg_index = num_segments
-    ai_cache = preload_ai_candidates(
-        ai_root=args.ai_root,
-        base_prefix=args.base_prefix,
+    ai_cache_left = preload_ai_candidates(
+        ai_root=args.ai_left_root,
+        base_prefix=args.ai_left_prefix,
         oq_candidates=args.oq_candidates,
         rq_candidates=args.rq_candidates,
         max_seg_index=max_seg_index,
         target_sr=sr,
     )
-    
+    ai_cache_right = preload_ai_candidates(
+        ai_root=args.ai_right_root,
+        base_prefix=args.ai_right_prefix,
+        oq_candidates=args.oq_candidates,
+        rq_candidates=args.rq_candidates,
+        max_seg_index=max_seg_index,
+        target_sr=sr,
+    )
+
     print(sd.query_hostapis())
     for i, d in enumerate(sd.query_devices()):
-        print(i, d['name'], '| hostapi =', sd.query_hostapis()[d['hostapi']]['name'])
-
+        print(i, d["name"], "| hostapi =", sd.query_hostapis()[d["hostapi"]]["name"])
 
     # ===== seg1 のデフォルト Saki を決定（中庸Oq/Rq, vib=3 とする） =====
     oq_candidates_sorted = sorted(args.oq_candidates)
@@ -555,25 +664,60 @@ def main():
     default_rq = rq_candidates_sorted[len(rq_candidates_sorted) // 2]
     default_vib = 3
 
-    fname_seg1 = rfs.build_audio_filename(
-        base_prefix=args.base_prefix,
+    # LEFT 用
+    fname_seg1_left = rfs.build_audio_filename(
+        base_prefix=args.ai_left_prefix,
         oq_idx=default_oq,
         rq_idx=default_rq,
         vib_idx=default_vib,
         segment_index=1,
         ext=".wav",
     )
-    path_seg1 = os.path.join(args.ai_root, fname_seg1)
-    if path_seg1 in ai_cache:
-        seg_configs[0].ai_path = path_seg1
-        seg_configs[0].ai_audio = ai_cache[path_seg1]
-        seg_configs[0].oq = default_oq
-        seg_configs[0].rq = default_rq
-        seg_configs[0].vib = default_vib
-        print(f"[INIT] seg01 default: {os.path.basename(path_seg1)} "
-              f"(Oq={default_oq}, Rq={default_rq}, vib={default_vib})")
-    else:
-        print(f"[INIT][WARN] デフォルト seg1 ファイルがキャッシュにありません: {path_seg1}")
+    path_seg1_left = os.path.join(args.ai_left_root, fname_seg1_left)
+
+    # RIGHT 用
+    fname_seg1_right = rfs.build_audio_filename(
+        base_prefix=args.ai_right_prefix,
+        oq_idx=default_oq,
+        rq_idx=default_rq,
+        vib_idx=default_vib,
+        segment_index=1,
+        ext=".wav",
+    )
+    path_seg1_right = os.path.join(args.ai_right_root, fname_seg1_right)
+
+    # LEFT 初期値
+    if path_seg1_left in ai_cache_left:
+        seg_configs[0].ai_path_L = path_seg1_left
+        seg_configs[0].ai_audio_L = ai_cache_left[path_seg1_left]
+    elif os.path.exists(path_seg1_left):
+        yL, fsL = sf.read(path_seg1_left, always_2d=True)
+        seg_configs[0].ai_path_L = path_seg1_left
+        seg_configs[0].ai_audio_L = yL.astype(np.float32)
+
+    # RIGHT 初期値
+    if path_seg1_right in ai_cache_right:
+        seg_configs[0].ai_path_R = path_seg1_right
+        seg_configs[0].ai_audio_R = ai_cache_right[path_seg1_right]
+    elif os.path.exists(path_seg1_right):
+        yR, fsR = sf.read(path_seg1_right, always_2d=True)
+        seg_configs[0].ai_path_R = path_seg1_right
+        seg_configs[0].ai_audio_R = yR.astype(np.float32)
+
+    # Oq/Rq/vib は左右とも同じデフォルト値
+    seg_configs[0].oq_L = default_oq
+    seg_configs[0].rq_L = default_rq
+    seg_configs[0].vib_L = default_vib
+    seg_configs[0].oq_R = default_oq
+    seg_configs[0].rq_R = default_rq
+    seg_configs[0].vib_R = default_vib
+
+    print(
+        f"[INIT] seg01 default L: {os.path.basename(path_seg1_left)} "
+        f"R: {os.path.basename(path_seg1_right)} "
+        f"(Oq={default_oq}, Rq={default_rq}, vib={default_vib})"
+    )
+
 
     # ===== マイク録音バッファ（全時間分を確保） =====
         # ===== 入力デバイスのチャンネル数に合わせて補正 =====
@@ -588,8 +732,14 @@ def main():
 
     # ===== マイク録音バッファ（全時間分を確保）=====
     total_duration = seg_ranges[-1][1]
-    total_samples = int((total_duration + 1.0) * sr)  # 余分に 1 秒
-    mic_buffer = np.zeros((total_samples, args.in_channels), dtype=np.float32)
+    total_samples = int((total_duration + 1.0) * sr)
+
+    # ★ 通し録音（full_buffer）を別に作る
+    full_buffer = np.zeros((total_samples, args.in_channels), dtype=np.float32)
+
+    # ★ 解析用の短い切り出しは、後で cfg.start/cfg.cut_time で mic_buffer から取得する
+    mic_buffer = full_buffer   # 互換性のため名前だけ残す
+
 
 
     # ===== ログ初期化（予測結果用）=====
@@ -620,10 +770,13 @@ def main():
             gmm_bank,
             args.oq_candidates,
             args.rq_candidates,
-            args.base_prefix,
-            args.ai_root,
+            args.ai_left_prefix,
+            args.ai_left_root,
+            args.ai_right_prefix,
+            args.ai_right_root,
         ),
     )
+
     analysis_proc.start()
     print("[PROC] analysis process started")
 
@@ -635,7 +788,16 @@ def main():
 
     def audio_callback(indata, outdata, frames, time_info, status):
         nonlocal current_seg_idx, last_debug_rec_time
-        global GLOBAL_SAMPLE_IDX, CURRENT_PLAYING
+        global GLOBAL_SAMPLE_IDX, CURRENT_PLAYING, STREAM_STOP_REQUESTED
+
+        # === 1) final_end を過ぎたら callback を即終了 ===
+        t_now = GLOBAL_SAMPLE_IDX / SR_GLOBAL
+        if t_now >= final_end:
+            # 出力をゼロにして音を止める
+            outdata[:] = np.zeros((frames, 2), dtype=np.float32)
+            STREAM_STOP_REQUESTED = True
+            return
+
 
         # ---- 録音レベル表示（0.5 秒周期・常時） ----
         if frames > 0:
@@ -662,16 +824,18 @@ def main():
             print(f"[SD STATUS] {status}", flush=True)
 
         # ---- 録音データを保存 ----
+        # ---- full_buffer にそのまま記録（seg とは無関係）----
         start_idx = GLOBAL_SAMPLE_IDX
         end_idx = start_idx + frames
-        if start_idx < mic_buffer.shape[0]:
-            write_len = min(frames, mic_buffer.shape[0] - start_idx)
-            mic_buffer[start_idx:start_idx + write_len, :indata.shape[1]] = indata[:write_len].astype(np.float32)
+
+        if start_idx < full_buffer.shape[0]:
+            write_len = min(frames, full_buffer.shape[0] - start_idx)
+            full_buffer[start_idx:start_idx + write_len, :indata.shape[1]] = indata[:write_len]
+
 
 
         # ---- 出力バッファを初期化 ----
         out = np.zeros((frames, 2), dtype=np.float32)
-
 
         for n in range(frames):
             t = (GLOBAL_SAMPLE_IDX + n) / sr
@@ -688,70 +852,93 @@ def main():
 
             # メトロノーム以降：伴奏 + 必要なら Saki
             # 伴奏（常にループ）
-            # metronome_duration 経過後から伴奏スタート
             acc_t = t - metronome_duration
             acc_idx = int(acc_t * sr) % accomp_audio.shape[0]
             out[n, 0] += accomp_audio[acc_idx, 0]
             out[n, 1] += accomp_audio[acc_idx, 0]
 
-            # 現在のセグメント index を更新（0-based）
-            # t が seg_j.start〜seg_j.end の範囲にあれば j にいる
-            # まず「今いる seg を抜けたか」をチェック
-            if current_seg_idx >= 0 and current_seg_idx < num_segments:
-                if t >= seg_configs[current_seg_idx].end:
-                    current_seg_idx += 1
-                    
-            # === 解析依頼（cut_time到達で1回だけ） ===
-            cfg = seg_configs[current_seg_idx]
-
-            if (not cfg.analysis_sent) and (t >= cfg.cut_time):
-                cfg.analysis_sent = True
-
-                # WAV抽出
-                seg_data = np.array(
-                    mic_buffer[int(cfg.start * sr):int(cfg.cut_time * sr), args.analysis_channel],
-                    dtype=np.float32
-                ).copy()
-
-                rec_wav = write_temp_wav(seg_data, sr, args.outdir, current_seg_idx+1)
-
-                print(f"[PROC] send task seg{current_seg_idx+1:02d}")
-                task_queue.put((current_seg_idx+1, rec_wav, current_seg_idx+2))
-
-
-
-            # まだセグメントに入っていない場合、t が最初の seg に入ったら 0 に
+            # -------- セグメント index 更新 --------
+            # まだどのセグメントにも入っていない場合：最初の seg に入ったら 0 にする
             if current_seg_idx < 0:
                 if t >= seg_configs[0].start:
                     current_seg_idx = 0
 
-            # 現在のセグメントで Saki を再生
+            # すでにセグメント内なら、end を過ぎたかチェック
             if 0 <= current_seg_idx < num_segments:
-                cfg = seg_configs[current_seg_idx]
-                if cfg.ai_audio is not None and cfg.start <= t < cfg.end:
-                    offset = int((t - cfg.start) * sr)
-                    if 0 <= offset < cfg.ai_audio.shape[0]:
-                        out[n, 0] += cfg.ai_audio[offset, 0]
-                        out[n, 1] += cfg.ai_audio[offset, 0]
-                        if cfg.ai_path is not None:
-                            CURRENT_PLAYING = os.path.basename(cfg.ai_path)
-                        else:
-                            CURRENT_PLAYING = "ACCOMP_ONLY"
+                if t >= seg_configs[current_seg_idx].end:
+                    if current_seg_idx + 1 < num_segments:
+                        # 次のセグメントへ
+                        current_seg_idx += 1
+                    else:
+                        # 最終セグメントを抜けた → 以降は伴奏のみ
+                        current_seg_idx = num_segments  # sentinel（配列の外を指す値）
+
+            # ここで「有効なセグメント外」になっていたら、伴奏だけ鳴らして終わり
+            if not (0 <= current_seg_idx < num_segments):
+                CURRENT_PLAYING = "ACCOMP_ONLY"
+                continue
+
+            # ここから先は「有効なセグメント内」でのみ実行される
+            cfg = seg_configs[current_seg_idx]
+            is_last_segment = (current_seg_idx == num_segments - 1)
+
+            # === 解析依頼（cut_time 到達で 1 回だけ） ===
+            if (not cfg.analysis_sent) and (t >= cfg.cut_time):
+                cfg.analysis_sent = True
+
+                if is_last_segment:
+                    # 最終セグメントでは次 AI を選ぶ必要がないので解析しない
+                    print(
+                        f"[PROC] final segment reached (seg{current_seg_idx+1:02d}), "
+                        "no more analysis."
+                    )
                 else:
-                    # このセグメントには ai_audio が設定されていない or 時間外
-                    if 0 <= current_seg_idx < num_segments and not bad_seg_logged[current_seg_idx]:
+                    seg_data = np.array(
+                        mic_buffer[int(cfg.start * sr):int(cfg.cut_time * sr),
+                                   args.analysis_channel],
+                        dtype=np.float32,
+                    ).copy()
+
+                    rec_wav = write_temp_wav(seg_data, sr, args.outdir, current_seg_idx + 1)
+                    print(f"[PROC] send task seg{current_seg_idx+1:02d}")
+                    task_queue.put((current_seg_idx + 1, rec_wav, current_seg_idx + 2))
+
+            # === 現在セグメントで AI(L/R) を再生 ===
+            if cfg.start <= t < cfg.end:
+                offset = int((t - cfg.start) * sr)
+                any_ai = False
+
+                # LEFT
+                if cfg.ai_audio_L is not None and 0 <= offset < cfg.ai_audio_L.shape[0]:
+                    out[n, 0] += cfg.ai_audio_L[offset, 0]
+                    any_ai = True
+
+                # RIGHT
+                if cfg.ai_audio_R is not None and 0 <= offset < cfg.ai_audio_R.shape[0]:
+                    out[n, 1] += cfg.ai_audio_R[offset, 0]
+                    any_ai = True
+
+                if any_ai:
+                    disp = cfg.ai_path_L or cfg.ai_path_R
+                    if disp is not None:
+                        CURRENT_PLAYING = os.path.basename(disp)
+                    else:
+                        CURRENT_PLAYING = "ACCOMP_ONLY"
+                else:
+                    if not bad_seg_logged[current_seg_idx]:
                         print(
                             f"[DEBUG-PLAY] seg{current_seg_idx+1:02d}: "
-                            f"ai_audio が None か、再生時間外のため ACCOMP_ONLY"
+                            f"ai_audio_L/R が None か、再生時間外のため ACCOMP_ONLY"
                         )
                         bad_seg_logged[current_seg_idx] = True
                     CURRENT_PLAYING = "ACCOMP_ONLY"
             else:
+                # セグメント時間外は伴奏のみ
                 CURRENT_PLAYING = "ACCOMP_ONLY"
-
 
         outdata[:] = out
         GLOBAL_SAMPLE_IDX += frames
+
 
     # ===== Streaming 実行（ASIO） =====
     print("[STREAM] Start full-duplex stream (ASIO)")
@@ -770,39 +957,118 @@ def main():
         )
     except Exception as e:
         print("[WARN] Failed to read ASIO device info:", e)
+        
+    final_end = seg_configs[-1].end
 
     # ===== ストリーム中のループ =====
     def run_stream_loop():
+        while not STREAM_STOP_REQUESTED:
+            time.sleep(0.05)
+
+            # final_end を過ぎたら解析処理も停止
+            if GLOBAL_SAMPLE_IDX / sr >= final_end:
+                break
+
+            # === プロセスからの解析結果 ===
+            while not result_queue.empty():
+                seg_num, next_seg, left_res, right_res = result_queue.get()
+                seg_label = f"seg{seg_num:02d}"
+
+                if left_res is None and right_res is None:
+                    print(f"[PROC-RESULT] {seg_label}: analysis failed (L/R)")
+                    continue
+
+                cfg_next = seg_configs[next_seg - 1]
+
+                # ----- LEFT -----
+                if left_res is not None:
+                    oq_L, rq_L, vib_L, ai_path_L, ai_audio_L, debug_L = left_res
+                    cfg_next.oq_L = oq_L
+                    cfg_next.rq_L = rq_L
+                    cfg_next.vib_L = vib_L
+                    cfg_next.ai_path_L = ai_path_L
+                    cfg_next.ai_audio_L = ai_audio_L
+                    print(f"[PROC-RESULT][LEFT ] {seg_label} → seg{next_seg:02d}: {ai_path_L}")
+                else:
+                    oq_L = rq_L = vib_L = -1
+                    ai_path_L = ""
+
+                # ----- RIGHT -----
+                if right_res is not None:
+                    oq_R, rq_R, vib_R, ai_path_R, ai_audio_R, debug_R = right_res
+                    cfg_next.oq_R = oq_R
+                    cfg_next.rq_R = rq_R
+                    cfg_next.vib_R = vib_R
+                    cfg_next.ai_path_R = ai_path_R
+                    cfg_next.ai_audio_R = ai_audio_R
+                    print(f"[PROC-RESULT][RIGHT] {seg_label} → seg{next_seg:02d}: {ai_path_R}")
+                else:
+                    oq_R = rq_R = vib_R = -1
+                    ai_path_R = ""
+
+                # --- seg ごとの解析結果を CSV に追記 (L/R 両方) ---
+                with open(log_csv, "a", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    writer.writerow([
+                        seg_num,
+                        seg_configs[seg_num - 1].start,
+                        seg_configs[seg_num - 1].end,
+                        seg_configs[seg_num - 1].cut_time,
+                        oq_L, rq_L, vib_L, ai_path_L,
+                        oq_R, rq_R, vib_R, ai_path_R,
+                    ])
         while GLOBAL_SAMPLE_IDX / sr < total_duration:
             time.sleep(0.1)
             # === プロセスからの解析結果 ===
             while not result_queue.empty():
-                seg_num, next_seg, oq, rq, vib, ai_path, ai_audio, debug = result_queue.get()
+                seg_num, next_seg, left_res, right_res = result_queue.get()
+                seg_label = f"seg{seg_num:02d}"
 
-                if ai_path is None:
-                    print(f"[PROC-RESULT] seg{seg_num:02d}: analysis failed")
+                if left_res is None and right_res is None:
+                    print(f"[PROC-RESULT] {seg_label}: analysis failed (L/R)")
                     continue
 
-                # next_cfg に反映
                 cfg_next = seg_configs[next_seg - 1]
-                cfg_next.oq = oq
-                cfg_next.rq = rq
-                cfg_next.vib = vib
-                cfg_next.ai_path = ai_path
 
-                # キャッシュロード
-                # ai_audio が analysis_worker で読み込み済みならそのまま使用
-                if ai_audio is not None:
-                    ai_cache[ai_path] = ai_audio
+                # ----- LEFT -----
+                if left_res is not None:
+                    oq_L, rq_L, vib_L, ai_path_L, ai_audio_L, debug_L = left_res
+                    cfg_next.oq_L = oq_L
+                    cfg_next.rq_L = rq_L
+                    cfg_next.vib_L = vib_L
+                    cfg_next.ai_path_L = ai_path_L
+                    cfg_next.ai_audio_L = ai_audio_L
+                    print(f"[PROC-RESULT][LEFT ] {seg_label} → seg{next_seg:02d}: {ai_path_L}")
+                else:
+                    oq_L = rq_L = vib_L = -1
+                    ai_path_L = ""
 
-                # 念のため、キャッシュになければ読み込む fallback
-                if ai_path not in ai_cache and os.path.exists(ai_path):
-                    y_ai, fs_ai = sf.read(ai_path, always_2d=True)
-                    ai_cache[ai_path] = y_ai.astype(np.float32)
+                # ----- RIGHT -----
+                if right_res is not None:
+                    oq_R, rq_R, vib_R, ai_path_R, ai_audio_R, debug_R = right_res
+                    cfg_next.oq_R = oq_R
+                    cfg_next.rq_R = rq_R
+                    cfg_next.vib_R = vib_R
+                    cfg_next.ai_path_R = ai_path_R
+                    cfg_next.ai_audio_R = ai_audio_R
+                    print(f"[PROC-RESULT][RIGHT] {seg_label} → seg{next_seg:02d}: {ai_path_R}")
+                else:
+                    oq_R = rq_R = vib_R = -1
+                    ai_path_R = ""
 
-                cfg_next.ai_audio = ai_cache.get(ai_path)
+                # --- seg ごとの解析結果を CSV に追記 (L/R 両方) ---
+                with open(log_csv, "a", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    writer.writerow([
+                        seg_num,
+                        seg_configs[seg_num - 1].start,
+                        seg_configs[seg_num - 1].end,
+                        seg_configs[seg_num - 1].cut_time,
+                        oq_L, rq_L, vib_L, ai_path_L,
+                        oq_R, rq_R, vib_R, ai_path_R,
+                    ])
 
-                print(f"[PROC-RESULT] seg{seg_num:02d} → seg{next_seg:02d}: {ai_path}")
+
 
 
     # ===== Stream パラメータ（ASIO 用）=====
@@ -822,11 +1088,46 @@ def main():
     try:
         with sd.Stream(**stream_args):
             run_stream_loop()
+            # final_end を過ぎたため stream を閉じる
+            STREAM_STOP_REQUESTED = True
+
     except Exception as e:
         print("[ERROR] Failed to start ASIO stream:", e)
         return
 
     print("[STREAM] Finished (ASIO)")
+    
+    
+    print("[SAVE] writing WAV/CSV/Parquet ...")
+
+    # --- 各チャンネル WAV 保存（mic0, mic1, mic2, egg）---
+    for ch in range(args.in_channels):
+        out_wav = os.path.join(args.outdir, f"full_ch{ch}.wav")
+        sf.write(out_wav, full_buffer[:, ch], sr)
+        print(f"[SAVE] {out_wav}")
+
+    # --- CSV (time, mic0, egg) ---
+    times = np.arange(full_buffer.shape[0]) / sr
+    mic0 = full_buffer[:, 0]
+    egg  = full_buffer[:, 3] if args.in_channels > 3 else np.zeros_like(mic0)
+
+    df = pd.DataFrame({
+        "time": times,
+        "mic": mic0,
+        "egg": egg,
+    })
+    csv_path = os.path.join(args.outdir, "full_record.csv")
+    df.to_csv(csv_path, index=False)
+    print(f"[SAVE] {csv_path}")
+
+    # --- Parquet ---
+    pq_path = os.path.join(args.outdir, "full_record.parquet")
+    try:
+        df.to_parquet(pq_path)
+        print(f"[SAVE] {pq_path}")
+    except Exception as e:
+        print("[WARN] parquet 保存失敗:", e)
+
     
     # ===== 解析スレッド終了を待つ（daemonだが一応少し待つ）=====
     time.sleep(1.0)
@@ -840,11 +1141,16 @@ def main():
                 cfg.start,
                 cfg.end,
                 cfg.cut_time,
-                cfg.oq if cfg.oq is not None else -1,
-                cfg.rq if cfg.rq is not None else -1,
-                cfg.vib if cfg.vib is not None else -1,
-                cfg.ai_path if cfg.ai_path is not None else "",
+                cfg.oq_L if cfg.oq_L is not None else -1,
+                cfg.rq_L if cfg.rq_L is not None else -1,
+                cfg.vib_L if cfg.vib_L is not None else -1,
+                cfg.ai_path_L if cfg.ai_path_L is not None else "",
+                cfg.oq_R if cfg.oq_R is not None else -1,
+                cfg.rq_R if cfg.rq_R is not None else -1,
+                cfg.vib_R if cfg.vib_R is not None else -1,
+                cfg.ai_path_R if cfg.ai_path_R is not None else "",
             ])
+
 
     print("[DONE] 全セグメント処理完了")
 

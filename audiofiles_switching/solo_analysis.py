@@ -500,124 +500,126 @@ def extract_acoustic_features(wav_path: str, target_sr: int = 44100) -> dict:
 # 4. Oq / Rq / vibrato の誤差定義 & 最尤インデックス選択
 # =========================================================
 
-def select_oq_rq_indices(
+def select_oq_rq_indices_top3(
     features: Dict[str, float],
     reg_bank: RegressionBank,
     perc_bank: PercentileBank,
     gmm_bank: GMMParams,
     oq_candidates: List[int],
     rq_candidates: List[int],
-) -> Tuple[int, int, Dict[str, float]]:
+    top_k: int = 3,
+):
     """
-    現在の音響特徴量から Oq/Rq の最尤パーセンタイルを決定する。
-    スコアは L_total = L_spline + L_z_total + L_gmm_total。
+    ★ Oq と Rq を「独立に」top3 返す版 ★
+    以前のような (Oq_idx, Rq_idx) の組み合わせ探索はしない。
+
+    戻り値:
+        top3_oq : [ { "oq_idx": idx, "score": L, ... }, ... ]
+        top3_rq : [ { "rq_idx": idx, "score": L, ... }, ... ]
+        debug   : { "oq_hat": ..., "rq_hat": ..., ... }
     """
 
-    # --- spline predicted values ---
+    # --- spline 推定値 ---
     oq_hat = reg_bank.predict_egg("Oq", features)
     rq_hat = reg_bank.predict_egg("Rq", features)
     if oq_hat is None or rq_hat is None:
-        raise RuntimeError("Failed to predict Oq or Rq. Check regression_spline_csv.")
+        raise RuntimeError("Failed to predict Oq or Rq.")
 
-    # --- std from extended_stats ---
     std_oq = perc_bank.get_std("Oq")
     std_rq = perc_bank.get_std("Rq")
 
-    # --- debug store ---
-    debug_info = {
-        "Oq_hat": oq_hat,
-        "Rq_hat": rq_hat,
-        "std_Oq": std_oq,
-        "std_Rq": std_rq,
-        "candidates": [],
-    }
-
-    # ========== inner helper: L_z ==========
-    def compute_L_z(pred_value: float, stats: dict) -> float:
-        mu = float(stats["mean"])
-        sd = float(stats["std"])
-        if sd <= 1e-9:
-            return (pred_value - mu)**2
-        return ((pred_value - mu) / sd)**2
-
-    # ========== inner helper: L_gmm ==========
-    def compute_L_gmm(pred_value: float, gmm_list: List[Dict[str, float]]) -> float:
-        if gmm_list is None:
-            return 0.0
-        total = 0.0
-        for g in gmm_list:
-            mu = float(g["mu_y"])
-            var = float(g["cov_yy"]) if g["cov_yy"] > 1e-12 else 1e-12
-            w = float(g["weight"])
-            total += w * ((pred_value - mu) ** 2 / var)
-        return total
-
-    # --- best solution holder ---
-    best_L = None
-    best_oq = None
-    best_rq = None
-
-    # load stats
     stats_oq = perc_bank.get_stats("Oq")
     stats_rq = perc_bank.get_stats("Rq")
 
-    # load GMM lists
+    # GMM
     gmm_list_oq = gmm_bank.bank.get(("Oq", "f0_hz"), [])
     gmm_list_rq = gmm_bank.bank.get(("Rq", "f0_hz"), [])
 
-    # =======================================================
-    # search oq_idx × rq_idx
-    # =======================================================
+    def compute_L_z(pred, stats):
+        mu = float(stats["mean"])
+        sd = float(stats["std"])
+        if sd <= 1e-9:
+            return (pred - mu)**2
+        return ((pred - mu)/sd)**2
+
+    def compute_L_gmm(pred, gmm_list):
+        total = 0.0
+        for g in gmm_list:
+            mu = float(g["mu_y"])
+            var = max(float(g["cov_yy"]), 1e-12)
+            w = float(g["weight"])
+            total += w * ((pred - mu)**2 / var)
+        return total
+
+    # =============================
+    # ★ Oq の top3（独立）
+    # =============================
+    scores_oq = []
     for oq_idx in oq_candidates:
         t_oq = perc_bank.get_target_value("Oq", oq_idx)
 
-        for rq_idx in rq_candidates:
-            t_rq = perc_bank.get_target_value("Rq", rq_idx)
+        # L_spline
+        e = (oq_hat - t_oq) / std_oq
+        L_spline = e**2
 
-            # --- L_spline ---
-            e_oq = (oq_hat - t_oq) / std_oq
-            e_rq = (rq_hat - t_rq) / std_rq
-            L_spline = e_oq**2 + e_rq**2
+        # L_z
+        L_z = compute_L_z(oq_hat, stats_oq)
 
-            # --- L_z ---
-            L_z_oq = compute_L_z(oq_hat, stats_oq)
-            L_z_rq = compute_L_z(rq_hat, stats_rq)
-            L_z_total = L_z_oq + L_z_rq
+        # L_gmm
+        L_gmm = compute_L_gmm(oq_hat, gmm_list_oq)
 
-            # --- L_gmm ---
-            L_gmm_oq = compute_L_gmm(oq_hat, gmm_list_oq)
-            L_gmm_rq = compute_L_gmm(rq_hat, gmm_list_rq)
-            L_gmm_total = L_gmm_oq + L_gmm_rq
+        L_total = L_spline + L_z + L_gmm
 
-            # --- final L ---
-            L = L_spline + L_z_total + L_gmm_total
+        scores_oq.append({
+            "oq_idx": oq_idx,
+            "target_Oq": t_oq,
+            "L_total": float(L_total),
+            "L_spline": float(L_spline),
+            "L_z": float(L_z),
+            "L_gmm": float(L_gmm),
+        })
 
-            # store for debug
-            debug_info["candidates"].append({
-                "oq_idx": oq_idx,
-                "rq_idx": rq_idx,
-                "target_Oq": t_oq,
-                "target_Rq": t_rq,
-                "L_spline": float(L_spline),
-                "L_z": float(L_z_total),
-                "L_gmm": float(L_gmm_total),
-                "L_total": float(L),
-            })
+    top3_oq = sorted(scores_oq, key=lambda x: x["L_total"])[:top_k]
 
-            # update minimum
-            if best_L is None or L < best_L:
-                best_L = L
-                best_oq = oq_idx
-                best_rq = rq_idx
+    # =============================
+    # ★ Rq の top3（独立）
+    # =============================
+    scores_rq = []
+    for rq_idx in rq_candidates:
+        t_rq = perc_bank.get_target_value("Rq", rq_idx)
 
-    if best_oq is None:
-        raise RuntimeError("No valid Oq/Rq candidate found.")
+        e = (rq_hat - t_rq) / std_rq
+        L_spline = e**2
+        L_z = compute_L_z(rq_hat, stats_rq)
+        L_gmm = compute_L_gmm(rq_hat, gmm_list_rq)
 
-    debug_info["best_L"] = float(best_L)
-    debug_info["best_oq_idx"] = int(best_oq)
-    debug_info["best_rq_idx"] = int(best_rq)
+        L_total = L_spline + L_z + L_gmm
 
-    return int(best_oq), int(best_rq), debug_info
+        scores_rq.append({
+            "rq_idx": rq_idx,
+            "target_Rq": t_rq,
+            "L_total": float(L_total),
+            "L_spline": float(L_spline),
+            "L_z": float(L_z),
+            "L_gmm": float(L_gmm),
+        })
+
+    top3_rq = sorted(scores_rq, key=lambda x: x["L_total"])[:top_k]
+
+    debug = {
+        "oq_hat": oq_hat,
+        "rq_hat": rq_hat,
+        "scores_oq": scores_oq,
+        "scores_rq": scores_rq,
+        "top3_oq": top3_oq,
+        "top3_rq": top3_rq,
+    }
+
+    return top3_oq, top3_rq, debug
+
+
+
+
 
 
 
@@ -663,32 +665,60 @@ def select_vibrato_index_from_percentiles(
     debug["best_L"] = float(best_L)
     return int(best_idx), debug
 
-
-
-
-# =========================================================
-# 5. ファイル名の組み立て
-# =========================================================
-
-def build_audio_filename(
-    base_prefix: str,
-    oq_idx: int,
-    rq_idx: int,
-    vib_idx: int,
-    segment_index: Optional[int] = None,
-    ext: str = ".wav",
-) -> str:
+def select_vibrato_index_top3(
+    vibrato_cents_abs: float,
+    perc_bank: PercentileBank,
+    top_k: int = 3
+) -> Tuple[List[Dict[str, float]], Dict[str, float]]:
     """
-    Concone ファイル名のパターン例:
-        concone_synthesizerV_SakiAI_1_1_1_seg10.wav
-
-    segment_index が None の場合:
-        concone_synthesizerV_SakiAI_1_1_1.wav
+    vibrato_cents_abs の top3 を返す版。
+    return:
+        top_list = [
+            { "idx": i, "target_v": x, "L": L },
+            ...
+        ]
+        debug
     """
-    if segment_index is None:
-        return f"{base_prefix}_{oq_idx}_{rq_idx}_{vib_idx}{ext}"
-    else:
-        return f"{base_prefix}_{oq_idx}_{rq_idx}_{vib_idx}_seg{segment_index:02d}{ext}"
+
+    vib_targets = {}
+    df = perc_bank.extended
+
+    # vibrato 5bin の中心値を取得
+    for idx in range(1, 5+1):
+        col = perc_bank.idx_to_col[idx]
+        cond = (
+            (df["segment_id"] == perc_bank.stats_segment_id)
+            & (df["quality"] == perc_bank.quality)
+            & (df["param"] == "vibrato_cents_abs")
+        )
+        sub = df.loc[cond, col]
+        if sub.empty:
+            raise ValueError("No vibrato percentile data.")
+        vib_targets[idx] = float(sub.iloc[0])
+
+    # 全候補のスコア
+    scores = []
+    for idx, target_v in vib_targets.items():
+        L = (vibrato_cents_abs - target_v)**2
+        scores.append({
+            "idx": idx,
+            "target_v": target_v,
+            "L": float(L),
+        })
+
+    # 昇順 top3
+    scores_sorted = sorted(scores, key=lambda x: x["L"])
+    top3 = scores_sorted[:top_k]
+
+    debug = {
+        "vibrato_cents_abs": vibrato_cents_abs,
+        "scores_all": scores,
+        "top3": top3,
+    }
+
+    return top3, debug
+
+
 
 
 # =========================================================
@@ -746,24 +776,17 @@ def main():
         "--oq_candidates",
         type=int,
         nargs="+",
-        default=[2, 3, 4],
+        default=[1, 2, 3, 4, 5],
         help="Oq パーセンタイル候補 (1〜5の整数)",
     )
     parser.add_argument(
         "--rq_candidates",
         type=int,
         nargs="+",
-        default=[1, 2, 3],
+        default=[1, 2, 3, 4, 5],
         help="Rq パーセンタイル候補 (1〜5の整数)",
     )
 
-    # 音声ファイル名のプレフィックス / seg 番号
-    parser.add_argument(
-        "--base_prefix",
-        type=str,
-        required=True,
-        help="例: concone_synthesizerV_SakiAI",
-    )
     parser.add_argument(
         "--segment_index",
         type=int,
@@ -805,7 +828,8 @@ def main():
     # 3) Oq / Rq index
     gmm_bank = load_gmm_params(args.gmm_csv)
 
-    oq_idx, rq_idx, debug_oqrq = select_oq_rq_indices(
+    # --- Oq / Rq を「独立に」top3 推定 ---
+    top3_oq, top3_rq, debug_oqrq = select_oq_rq_indices_top3(
         features=feat,
         reg_bank=reg_bank,
         perc_bank=perc_bank,
@@ -814,12 +838,26 @@ def main():
         rq_candidates=args.rq_candidates,
     )
 
+    print("=== Oq Top3 ===")
+    for r in top3_oq:
+        print(r)
 
-    # 4) vibrato index
-    vib_idx, debug_vib = select_vibrato_index_from_percentiles(
+    print("=== Rq Top3 ===")
+    for r in top3_rq:
+        print(r)
+
+    # --- Vibrato top3 ---
+    top3_vib, debug_vib = select_vibrato_index_top3(
         vibrato_cents_abs=feat["vibrato_cents_abs"],
         perc_bank=perc_bank,
     )
+
+    print("=== Vibrato Top3 ===")
+    for r in top3_vib:
+        print(r)
+
+
+    
 
 
     # 5) ファイル名
@@ -829,14 +867,11 @@ def main():
     else:
         next_seg = None
 
-    fname = build_audio_filename(
-        base_prefix=args.base_prefix,
-        oq_idx=oq_idx,
-        rq_idx=rq_idx,
-        vib_idx=vib_idx,
-        segment_index=next_seg,
-        ext=".wav",
-    )
+    # best（=最小 L）を top3 から取る
+    # best（=最小 L）を top3 から取る
+    best_oq_idx = top3_oq[0]["oq_idx"]
+    best_rq_idx = top3_rq[0]["rq_idx"]
+    best_vib_idx = top3_vib[0]["idx"]
 
 
     result = {
@@ -844,14 +879,19 @@ def main():
         "features": feat,
         "OqRq_debug": debug_oqrq,
         "vib_debug": debug_vib,
-        "best_oq_idx": oq_idx,
-        "best_rq_idx": rq_idx,
-        "best_vib_idx": vib_idx,
-        "selected_filename": fname,
+        "best_oq_idx": best_oq_idx,
+        "best_rq_idx": best_rq_idx,
+        "best_vib_idx": best_vib_idx,
     }
 
     print("===== RESULT =====")
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    
+    print("\n===== SUMMARY TOP3 =====")
+    print("Oq:", [item["oq_idx"] for item in top3_oq])
+    print("Rq:", [item["rq_idx"] for item in top3_rq])
+    print("Vib:", [item["idx"] for item in top3_vib])
+
 
     if args.out_json is not None:
         with open(args.out_json, "w", encoding="utf-8") as f:

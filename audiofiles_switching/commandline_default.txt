@@ -1,0 +1,15 @@
+python audiofiles_switching\default_concone.py  
+    --outdir audiofiles_switching\real_audio\default
+    --input_device 14
+    --output_device 14
+
+
+python audiofiles_switching\human_concone.py  
+    --outdir audiofiles_switching\real_audio\human
+    --input_device 14
+    --output_device 14
+
+python audiofiles_switching\solo_concone.py  
+    --outdir audiofiles_switching\real_audio\solo
+    --input_device 14
+    --output_device 14

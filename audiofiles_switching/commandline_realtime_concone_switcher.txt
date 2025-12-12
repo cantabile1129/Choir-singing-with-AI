@@ -1,12 +1,14 @@
 python audiofiles_switching\realtime_concone_asio.py 
   --segments "6-12" "12-18" "18-23.25" "23.25-30" "30-36" "36-42" "42-48" "48-54" "54-60" "60-66" "66-71.25" "71.25-78" 
-  --percentiles_csv audiofiles_switching\analysis_csv\merged_pre_id1-id2_solo_segALL_param_percentiles.csv 
-  --extended_csv audiofiles_switching\analysis_csv\merged_pre_id1-id2_solo_segALL_extended_stats.csv 
-  --reg_spline_csv audiofiles_switching\analysis_csv\merged_pre_id1-id2_solo_segALL_CLEAN_egg_vs_audio_regressions_spline.csv 
-  --gmm_csv audiofiles_switching\analysis_csv\merged_pre_id1-id2_solo_segALL_CLEAN_gmm_params.csv 
-  --ai_root audiofiles_switching\audiofiles\Saki
-  --base_prefix concone_synthesizerV_SakiAI 
-  --outdir audiofiles_switching\real_audio
+  --percentiles_csv audiofiles_switching\analysis_csv\merged_pre_id4-id5-id6-id8_solo_segALL_param_percentiles.csv 
+  --extended_csv audiofiles_switching\analysis_csv\merged_pre_id4-id5-id6-id8_solo_segALL_extended_stats.csv 
+  --reg_spline_csv audiofiles_switching\analysis_csv\merged_pre_id4-id5-id6-id8_solo_segALL_CLEAN_egg_vs_audio_regressions_spline.csv 
+  --gmm_csv audiofiles_switching\analysis_csv\merged_pre_id4-id5-id6-id8_solo_segALL_CLEAN_gmm_params.csv 
+  --ai_left_root audiofiles_switching\audiofiles\Jin
+  --ai_left_prefix concone_synthesizerV_JinAI 
+  --ai_right_root audiofiles_switching\audiofiles\Kevin
+  --ai_right_prefix concone_synthesizerV_KevinAI
+  --outdir audiofiles_switching\real_audio\proposal
   --metronome_wav audiofiles_switching\audiofiles\コンコーネ50番前出しスネアドラム.wav
   --accomp_wav audiofiles_switching\audiofiles\Concone_ピアノ伴奏.wav
   --in_channels 8
@@ -15,4 +17,4 @@ python audiofiles_switching\realtime_concone_asio.py
   --output_device 14
   --segment_id segALL
   --quality CLEAN
-  --cut_margin 0.5
+  --cut_margin 0.75
