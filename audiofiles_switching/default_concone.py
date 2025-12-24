@@ -38,8 +38,8 @@ METRONOME_WAV = "audiofiles_switching/audiofiles/コンコーネ50番前出し�
 ACCOMP_WAV    = "audiofiles_switching/audiofiles/Concone_ピアノ伴奏.wav"
 
 # L/R それぞれの AI 音声
-AI_LEFT_WAV   = "audiofiles_switching/audiofiles/default/concone_synthesizerV_JinAI_default_MixDown.wav"
-AI_RIGHT_WAV  = "audiofiles_switching/audiofiles/default/concone_synthesizerV_KevinAI_default_MixDown.wav"
+AI_LEFT_WAV   = "audiofiles_switching/audiofiles/default/concone_synthesizerV_MoChenAI_default_MixDown.wav"
+AI_RIGHT_WAV  = "audiofiles_switching/audiofiles/default/concone_synthesizerV_RyoAI_default_MixDown.wav"
 
 
 def load_wav(path: str, sr: int) -> np.ndarray:

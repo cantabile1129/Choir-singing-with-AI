@@ -4,10 +4,10 @@ python audiofiles_switching\realtime_concone_asio.py
   --extended_csv audiofiles_switching\analysis_csv\merged_pre_id4-id5-id6-id8_solo_segALL_extended_stats.csv 
   --reg_spline_csv audiofiles_switching\analysis_csv\merged_pre_id4-id5-id6-id8_solo_segALL_CLEAN_egg_vs_audio_regressions_spline.csv 
   --gmm_csv audiofiles_switching\analysis_csv\merged_pre_id4-id5-id6-id8_solo_segALL_CLEAN_gmm_params.csv 
-  --ai_left_root audiofiles_switching\audiofiles\Jin
-  --ai_left_prefix concone_synthesizerV_JinAI 
-  --ai_right_root audiofiles_switching\audiofiles\Kevin
-  --ai_right_prefix concone_synthesizerV_KevinAI
+  --ai_left_root audiofiles_switching\audiofiles\MoChen
+  --ai_left_prefix concone_synthesizerV_MoChenAI 
+  --ai_right_root audiofiles_switching\audiofiles\Ryo
+  --ai_right_prefix concone_synthesizerV_RyoAI
   --outdir audiofiles_switching\real_audio\proposal
   --metronome_wav audiofiles_switching\audiofiles\コンコーネ50番前出しスネアドラム.wav
   --accomp_wav audiofiles_switching\audiofiles\Concone_ピアノ伴奏.wav
